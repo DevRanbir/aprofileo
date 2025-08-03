@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1014270273523",
+    "project_id": "devprofileo",
+    "storage_bucket": "devprofileo.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1014270273523:android:25fec5bf012a7bc6f31486",
+        "android_client_info": {
+          "package_name": "com.example.aprofileo"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDOTZUsu7l_E7nSCukf7AZhV1-ozmf3Vk8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
