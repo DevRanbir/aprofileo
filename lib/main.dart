@@ -1,28 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
-import 'package:firebase_messaging/firebase_messaging.dart';
-import 'package:firebase_analytics/firebase_analytics.dart';
 import 'firebase_options.dart';
 import 'screens/admin_chat_screen.dart';
-import 'services/notification_service_mobile.dart';
-import 'services/global_notification_manager.dart';
-import 'services/background_notification_service.dart';
+import 'services/notification_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
 
-  // Initialize Firebase Analytics
-  FirebaseAnalytics analytics = FirebaseAnalytics.instance;
-  
-  // Register background message handler
-  FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
-
-  // Initialize global notification manager
-  await GlobalNotificationManager.instance.initialize();
-
-  // Initialize background notification service for when app is minimized/closed
-  await BackgroundNotificationService.instance.startMonitoring();
+  // Initialize notification service
+  await NotificationService().initialize();
 
   runApp(const MyApp());
 }

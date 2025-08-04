@@ -1,12 +1,12 @@
 plugins {
     id("com.android.application")
-    // START: FlutterFire Configuration
-    id("com.google.gms.google-services")
-    // END: FlutterFire Configuration
     id("kotlin-android")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
 }
+
+// Apply Google Services plugin
+apply(plugin = "com.google.gms.google-services")
 
 android {
     namespace = "com.example.aprofileo"
@@ -47,17 +47,17 @@ android {
 }
 
 dependencies {
-
-    // Firestore
-    implementation("com.google.firebase:firebase-firestore-ktx")
-
+    // Core library desugaring
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
+    
     // Import the Firebase BoM
     implementation(platform("com.google.firebase:firebase-bom:32.3.1"))
-    // Firebase Messaging
+    
+    // Firebase dependencies
+    implementation("com.google.firebase:firebase-firestore-ktx")
     implementation("com.google.firebase:firebase-messaging-ktx")
-    // Firebase Analytics 
     implementation("com.google.firebase:firebase-analytics-ktx")
+    
     // Support for multidex
     implementation("androidx.multidex:multidex:2.0.1")
 }

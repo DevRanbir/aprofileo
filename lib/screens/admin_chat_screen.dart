@@ -1,11 +1,10 @@
 import 'package:flutter/material.dart';
 import '../models/chat_models.dart';
 import '../services/chat_service.dart';
+import '../services/notification_service.dart';
 import '../widgets/thread_list_item.dart';
 import '../widgets/chat_conversation.dart';
 import '../widgets/admin_stats_widget.dart';
-import '../services/notification_service.dart';
-import '../services/global_notification_manager.dart';
 
 class AdminChatScreen extends StatefulWidget {
   const AdminChatScreen({super.key});
@@ -17,7 +16,6 @@ class AdminChatScreen extends StatefulWidget {
 class _AdminChatScreenState extends State<AdminChatScreen>
     with TickerProviderStateMixin {
   final ChatService _chatService = ChatService();
-  final NotificationService _notificationService = NotificationService();
   final TextEditingController _searchController = TextEditingController();
   ChatThread? _selectedThread;
   String _searchQuery = '';
@@ -35,9 +33,6 @@ class _AdminChatScreenState extends State<AdminChatScreen>
     );
 
     _sidebarAnimationController.forward();
-
-    // Initialize notification service
-    _initializeNotifications();
 
     // Note: Global notification manager now handles message notifications
     // No need to listen for messages here anymore
@@ -57,10 +52,6 @@ class _AdminChatScreenState extends State<AdminChatScreen>
     });
 
     // Note: Global notification manager now handles all message notifications
-  }
-
-  Future<void> _initializeNotifications() async {
-    await _notificationService.initialize();
   }
 
   @override
@@ -100,24 +91,35 @@ class _AdminChatScreenState extends State<AdminChatScreen>
   // Test notification function
   Future<void> _testNotification() async {
     try {
-      // Use the global notification manager for testing
-      final globalManager = GlobalNotificationManager.instance;
+      // Check notification permission first
+      final hasPermission =
+          await NotificationService().isNotificationPermissionGranted();
+      if (!hasPermission) {
+        final granted =
+            await NotificationService().requestNotificationPermission();
+        if (!granted) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Notification permission denied'),
+                backgroundColor: Colors.red,
+              ),
+            );
+          }
+          return;
+        }
+      }
 
-      // First debug the notification status
-      await globalManager.notificationService.debugNotificationStatus();
-
-      // Send test notification via global manager
-      await globalManager.notificationService.sendTestNotification();
-
-      // Also try the quick test
-      await globalManager.notificationService.sendQuickTestNotification();
+      // Show test notification
+      await NotificationService().testNotification(
+        title: 'AProfileo Admin',
+        body: 'This is a test notification!',
+      );
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text(
-              'Test notification sent via Global Manager! Check console for debug info.',
-            ),
+            content: Text('Test notification sent!'),
             backgroundColor: Colors.green,
             duration: Duration(seconds: 3),
           ),
@@ -129,7 +131,7 @@ class _AdminChatScreenState extends State<AdminChatScreen>
           SnackBar(
             content: Text('Notification test failed: $e'),
             backgroundColor: Colors.red,
-            duration: Duration(seconds: 3),
+            duration: const Duration(seconds: 3),
           ),
         );
       }
@@ -185,9 +187,8 @@ class _AdminChatScreenState extends State<AdminChatScreen>
                     ? 'Test completed successfully! Check user: ${testResult['testUserName']}'
                     : 'Test failed: ${testResult['error']}',
               ),
-              backgroundColor: testResult['success']
-                  ? Colors.green
-                  : Colors.red,
+              backgroundColor:
+                  testResult['success'] ? Colors.green : Colors.red,
               duration: const Duration(seconds: 4),
             ),
           );
@@ -569,8 +570,7 @@ class _AdminChatScreenState extends State<AdminChatScreen>
                               : null,
                         ),
                         // Only show content when sidebar is visible or animating
-                        child:
-                            (_sidebarVisible ||
+                        child: (_sidebarVisible ||
                                 _sidebarAnimationController.isAnimating)
                             ? Opacity(
                                 opacity: animationValue,
@@ -651,9 +651,8 @@ class _AdminChatScreenState extends State<AdminChatScreen>
                         size: 18,
                       ),
                       onPressed: _toggleSidebar,
-                      tooltip: _sidebarVisible
-                          ? 'Hide Sidebar'
-                          : 'Show Sidebar',
+                      tooltip:
+                          _sidebarVisible ? 'Hide Sidebar' : 'Show Sidebar',
                       constraints: const BoxConstraints(
                         minWidth: 32,
                         minHeight: 32,
@@ -789,17 +788,6 @@ class _AdminChatScreenState extends State<AdminChatScreen>
                           size: 36,
                           color: Colors.red,
                         ),
-                        const SizedBox(height: 12),
-                        Text(
-                          'Error loading threads',
-                          style: TextStyle(
-                            color: Colors.red,
-                            fontSize: 14,
-                            fontWeight: FontWeight.w500,
-                          ),
-                          textAlign: TextAlign.center,
-                        ),
-                        const SizedBox(height: 4),
                         Text(
                           '${snapshot.error}',
                           style: TextStyle(

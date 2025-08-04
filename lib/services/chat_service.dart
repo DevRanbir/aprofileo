@@ -2,6 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 // import 'package:http/http.dart' as http;
 import 'dart:convert';
+import 'dart:developer';
 import '../models/chat_models.dart';
 import 'notification_service.dart';
 
@@ -10,7 +11,6 @@ class ChatService {
   static const String fcmTokensCollection = 'fcm-tokens';
   static const String notificationHistoryCollection = 'notification-history';
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
-  final NotificationService _notificationService = NotificationService();
   final FirebaseMessaging _messaging = FirebaseMessaging.instance;
 
   // Track notification history to prevent duplicates for old messages
@@ -22,12 +22,124 @@ class ChatService {
   // Set the currently open chat user ID (call when opening a chat)
   void setCurrentlyOpenChat(String? userId) {
     _currentlyOpenChatUserId = userId;
-    print('📱 Currently open chat set to userId: ${userId ?? "none"}');
+    log('📱 Currently open chat set to userId: ${userId ?? "none"}');
   }
 
   // Get the currently open chat user ID
   String? getCurrentlyOpenChat() {
     return _currentlyOpenChatUserId;
+  }
+
+  // Send FCM notification for new message
+  Future<void> _sendFCMNotificationForNewMessage({
+    required String userName,
+    required String message,
+    required String messageId,
+    required String timestamp,
+  }) async {
+    try {
+      // Create immediate notification request
+      await _createImmediateNotificationRequest(
+        userName: userName,
+        message: message,
+        messageId: messageId,
+        timestamp: timestamp,
+      );
+
+      // Also send to notification service
+      await NotificationService().sendChatNotificationToAllTokens(
+        title: 'New message from $userName',
+        body:
+            message.length > 100 ? '${message.substring(0, 100)}...' : message,
+        messageId: messageId,
+        sender: userName,
+        timestamp: timestamp,
+      );
+    } catch (e) {
+      log('Error sending FCM notification: $e');
+    }
+  }
+
+  // Create immediate notification request for background processing
+  Future<void> _createImmediateNotificationRequest({
+    required String userName,
+    required String message,
+    required String messageId,
+    required String timestamp,
+  }) async {
+    try {
+      final now = DateTime.now();
+
+      // Create 5 redundant notification requests with different strategies
+      for (int i = 0; i < 5; i++) {
+        // Strategy 1: Regular notification requests
+        await _firestore.collection('notification_requests').add({
+          'type': 'chat_message',
+          'title': 'New message from $userName',
+          'body': message.length > 100
+              ? '${message.substring(0, 100)}...'
+              : message,
+          'data': {
+            'messageId': messageId,
+            'sender': userName,
+            'timestamp': timestamp,
+            'type': 'chat_message',
+          },
+          'timestamp': FieldValue.serverTimestamp(),
+          'createdAt': now.add(Duration(seconds: i)).toIso8601String(),
+          'processed': false,
+          'retryCount': i,
+          'strategy': 'primary',
+        });
+
+        // Strategy 2: Emergency notification requests
+        await _firestore.collection('emergency_notifications').add({
+          'type': 'chat_message_backup',
+          'title': 'Message from $userName',
+          'body':
+              message.length > 50 ? '${message.substring(0, 50)}...' : message,
+          'messageId': messageId,
+          'sender': userName,
+          'timestamp': timestamp,
+          'createdAt':
+              now.add(Duration(milliseconds: i * 500)).toIso8601String(),
+          'processed': false,
+          'priority': 'high',
+          'strategy': 'emergency',
+        });
+
+        // Strategy 3: Background polling triggers
+        await _firestore.collection('background_triggers').add({
+          'action': 'check_messages',
+          'userName': userName,
+          'messageId': messageId,
+          'timestamp': FieldValue.serverTimestamp(),
+          'triggerTime': now.add(Duration(seconds: i + 2)).toIso8601String(),
+          'processed': false,
+          'strategy': 'polling',
+        });
+      }
+
+      // Strategy 4: Direct FCM notification data in multiple collections
+      for (String collection in [
+        'fcm_queue',
+        'notification_backup',
+        'message_alerts'
+      ]) {
+        await _firestore.collection(collection).add({
+          'type': 'new_message',
+          'userName': userName,
+          'message': message,
+          'messageId': messageId,
+          'timestamp': timestamp,
+          'createdAt': now.toIso8601String(),
+          'processed': false,
+          'collection': collection,
+        });
+      }
+    } catch (e) {
+      log('Error creating notification request: $e');
+    }
   }
 
   // Check if notification should be sent (prevents spam and old message notifications)
@@ -48,7 +160,7 @@ class ChatService {
       return true;
     }
 
-    print('⏰ Notification cooldown active for: $notificationKey');
+    log('⏰ Notification cooldown active for: $notificationKey');
     return false;
   }
 
@@ -63,16 +175,16 @@ class ChatService {
           .collection(notificationHistoryCollection)
           .doc('${userName}_${type}_$messageId')
           .set({
-            'userName': userName,
-            'messageId': messageId,
-            'type': type,
-            'timestamp': Timestamp.now(),
-            'expiresAt': Timestamp.fromDate(
-              DateTime.now().add(const Duration(hours: 6)),
-            ),
-          });
+        'userName': userName,
+        'messageId': messageId,
+        'type': type,
+        'timestamp': Timestamp.now(),
+        'expiresAt': Timestamp.fromDate(
+          DateTime.now().add(const Duration(hours: 6)),
+        ),
+      });
     } catch (e) {
-      print('Error storing notification history: $e');
+      log('Error storing notification history: $e');
     }
   }
 
@@ -89,7 +201,7 @@ class ChatService {
           .get();
       return doc.exists;
     } catch (e) {
-      print('Error checking notification history: $e');
+      log('Error checking notification history: $e');
       return false;
     }
   }
@@ -97,7 +209,7 @@ class ChatService {
   // Cleanup expired notification history
   Future<void> _cleanupExpiredNotificationHistory() async {
     try {
-      print('🧹 Cleaning up expired notification history...');
+      log('🧹 Cleaning up expired notification history...');
 
       final cutoffTime = DateTime.now().subtract(const Duration(hours: 6));
       final query = _firestore
@@ -112,9 +224,9 @@ class ChatService {
         deletedCount++;
       }
 
-      print('✅ Cleaned up $deletedCount expired notification history entries');
+      log('✅ Cleaned up $deletedCount expired notification history entries');
     } catch (e) {
-      print('Error cleaning up notification history: $e');
+      log('Error cleaning up notification history: $e');
     }
   }
 
@@ -127,19 +239,17 @@ class ChatService {
         'platform': 'mobile',
       }, SetOptions(merge: true));
 
-      print('✅ FCM token stored for user: $userName');
+      log('✅ FCM token stored for user: $userName');
     } catch (e) {
-      print('❌ Error storing FCM token for $userName: $e');
+      log('❌ Error storing FCM token for $userName: $e');
     }
   }
 
   // Get FCM token for a user
   Future<String?> getFCMToken(String userName) async {
     try {
-      final doc = await _firestore
-          .collection(fcmTokensCollection)
-          .doc(userName)
-          .get();
+      final doc =
+          await _firestore.collection(fcmTokensCollection).doc(userName).get();
 
       if (doc.exists) {
         final data = doc.data() as Map<String, dynamic>;
@@ -147,7 +257,7 @@ class ChatService {
       }
       return null;
     } catch (e) {
-      print('❌ Error getting FCM token for $userName: $e');
+      log('❌ Error getting FCM token for $userName: $e');
       return null;
     }
   }
@@ -162,7 +272,7 @@ class ChatService {
     try {
       final token = await getFCMToken(targetUserName);
       if (token == null) {
-        print('⚠️ No FCM token found for user: $targetUserName');
+        log('⚠️ No FCM token found for user: $targetUserName');
         return;
       }
 
@@ -189,12 +299,12 @@ class ChatService {
         },
       };
 
-      print('📱 FCM notification payload prepared for $targetUserName:');
-      print('   Title: $title');
-      print('   Body: $body');
-      print('   Token: ${token.substring(0, 20)}...');
-      print('   Data: $data');
-      print('   Payload: ${jsonEncode(notificationPayload)}');
+      log('📱 FCM notification payload prepared for $targetUserName:');
+      log('   Title: $title');
+      log('   Body: $body');
+      log('   Token: ${token.substring(0, 20)}...');
+      log('   Data: $data');
+      log('   Payload: ${jsonEncode(notificationPayload)}');
 
       // NOTE: In a real production app, you would send this to your server
       // which would then use the Firebase Admin SDK to send the notification.
@@ -207,9 +317,9 @@ class ChatService {
       //   body: jsonEncode(notificationPayload),
       // );
 
-      print('✅ FCM notification would be sent to server for processing');
+      log('✅ FCM notification would be sent to server for processing');
     } catch (e) {
-      print('❌ Error preparing FCM notification for $targetUserName: $e');
+      log('❌ Error preparing FCM notification for $targetUserName: $e');
     }
   }
 
@@ -230,12 +340,12 @@ class ChatService {
         'processed': false,
       });
 
-      print('📡 Admin notification queued for background processing');
-      print('   Title: $title');
-      print('   Body: $body');
-      print('   Data: $data');
+      log('📡 Admin notification queued for background processing');
+      log('   Title: $title');
+      log('   Body: $body');
+      log('   Data: $data');
     } catch (e) {
-      print('❌ Error queuing admin notification: $e');
+      log('❌ Error queuing admin notification: $e');
     }
   }
 
@@ -260,9 +370,9 @@ class ChatService {
         'notificationSent': false,
       });
 
-      print('📨 Admin notification request stored for userId: $userId');
+      log('📨 Admin notification request stored for userId: $userId');
     } catch (e) {
-      print('❌ Error storing admin notification request: $e');
+      log('❌ Error storing admin notification request: $e');
     }
   }
 
@@ -272,16 +382,16 @@ class ChatService {
       final token = await _messaging.getToken();
       if (token != null) {
         await storeFCMToken(userName, token);
-        print('🔑 FCM initialized for user: $userName');
+        log('🔑 FCM initialized for user: $userName');
       }
 
       // Listen for token refresh
       _messaging.onTokenRefresh.listen((newToken) {
         storeFCMToken(userName, newToken);
-        print('🔄 FCM token refreshed for user: $userName');
+        log('🔄 FCM token refreshed for user: $userName');
       });
     } catch (e) {
-      print('❌ Error initializing FCM for $userName: $e');
+      log('❌ Error initializing FCM for $userName: $e');
     }
   }
 
@@ -319,7 +429,7 @@ class ChatService {
     if (querySnapshot.docs.isNotEmpty) {
       // Found existing document
       final existingDoc = querySnapshot.docs.first;
-      print(
+      log(
         '🔍 Found existing document: ${existingDoc.id} for userName: $userName',
       );
       return existingDoc.reference;
@@ -328,7 +438,7 @@ class ChatService {
     // Create new document with timestamp-based ID
     final timestamp = DateTime.now().millisecondsSinceEpoch;
     final docId = '${safeUserName}_$timestamp';
-    print('🔑 Creating new document ID for userName: $userName → $docId');
+    log('🔑 Creating new document ID for userName: $userName → $docId');
     return _firestore.collection(chatCollection).doc(docId);
   }
 
@@ -340,10 +450,10 @@ class ChatService {
         .limit(100)
         .snapshots()
         .map((snapshot) {
-          return snapshot.docs.map((doc) {
-            return ChatThread.fromMap(doc.id, doc.data());
-          }).toList();
-        });
+      return snapshot.docs.map((doc) {
+        return ChatThread.fromMap(doc.id, doc.data());
+      }).toList();
+    });
   }
 
   // Subscribe to a specific chat thread by userId
@@ -354,13 +464,13 @@ class ChatService {
         .limit(1)
         .snapshots()
         .map((snapshot) {
-          if (snapshot.docs.isNotEmpty) {
-            final doc = snapshot.docs.first;
-            final data = doc.data();
-            return ChatThread.fromMap(doc.id, data);
-          }
-          return null;
-        });
+      if (snapshot.docs.isNotEmpty) {
+        final doc = snapshot.docs.first;
+        final data = doc.data();
+        return ChatThread.fromMap(doc.id, data);
+      }
+      return null;
+    });
   }
 
   // Send a message to chat (creates or updates user's chat document)
@@ -390,8 +500,8 @@ class ChatService {
         // Update existing chat document
         final chatData = chatDoc.data() as Map<String, dynamic>;
 
-        print('📝 Adding message to existing chat document for: $userName');
-        print(
+        log('📝 Adding message to existing chat document for: $userName');
+        log(
           '🔍 Current messages count: ${(chatData['messages'] as Map<String, dynamic>?)?.length ?? 0}',
         );
 
@@ -401,8 +511,16 @@ class ChatService {
           'lastUpdated': now,
         });
 
-        print(
+        log(
           '✅ Message added to existing chat for user: $userName, message ID: $messageId',
+        );
+
+        // Send FCM notification for background delivery
+        await _sendFCMNotificationForNewMessage(
+          userName: userName,
+          message: message,
+          messageId: messageId,
+          timestamp: now.millisecondsSinceEpoch.toString(),
         );
 
         // Send notification to admin about new user message (only once)
@@ -421,12 +539,7 @@ class ChatService {
           if (!wasNotificationSent &&
               !isChatCurrentlyOpen &&
               _shouldSendNotification(notificationKey)) {
-            await _notificationService.showNotification(
-              'New message from $userName',
-              message.length > 50 ? '${message.substring(0, 50)}...' : message,
-              payload: 'admin_chat_$userName',
-            );
-            print('Admin notification sent for message from: $userName');
+            log('Admin notification sent for message from: $userName');
 
             // Store notification history
             await _storeNotificationHistory(
@@ -452,22 +565,22 @@ class ChatService {
             );
           } else {
             if (isChatCurrentlyOpen) {
-              print(
+              log(
                 '⏭️ Skipping notification - chat with $userName is currently open',
               );
             } else {
-              print(
+              log(
                 '⏭️ Skipping duplicate notification for message: $messageId',
               );
             }
           }
         } catch (e) {
-          print('Error sending admin notification: $e');
+          log('Error sending admin notification: $e');
           // Don't fail the message sending if notification fails
         }
       } else {
         // Create new chat document
-        print('📄 Creating new chat document for: $userName');
+        log('📄 Creating new chat document for: $userName');
 
         final newChatData = {
           'userName': userName,
@@ -479,8 +592,16 @@ class ChatService {
         };
 
         await chatDocRef.set(newChatData);
-        print(
+        log(
           '✅ New chat document created for user: $userName, message ID: $messageId',
+        );
+
+        // Send FCM notification for background delivery
+        await _sendFCMNotificationForNewMessage(
+          userName: userName,
+          message: message,
+          messageId: messageId,
+          timestamp: now.millisecondsSinceEpoch.toString(),
         );
 
         // Send notification to admin about new user message (for new chat)
@@ -495,12 +616,7 @@ class ChatService {
           if (!wasNotificationSent &&
               !isChatCurrentlyOpen &&
               _shouldSendNotification(notificationKey)) {
-            await _notificationService.showNotification(
-              'New chat started by $userName',
-              message.length > 50 ? '${message.substring(0, 50)}...' : message,
-              payload: 'admin_chat_$userName',
-            );
-            print('Admin notification sent for new chat from: $userName');
+            log('Admin notification sent for new chat from: $userName');
 
             // Store notification history
             await _storeNotificationHistory(userName, messageId, 'new_chat');
@@ -521,12 +637,12 @@ class ChatService {
               },
             );
           } else if (isChatCurrentlyOpen) {
-            print(
+            log(
               '⏭️ Skipping new chat notification - chat with $userName is currently open',
             );
           }
         } catch (e) {
-          print('Error sending admin notification for new chat: $e');
+          log('Error sending admin notification for new chat: $e');
           // Don't fail the message sending if notification fails
         }
       }
@@ -538,7 +654,7 @@ class ChatService {
         'chatDocId': chatDocRef.id,
       };
     } catch (error) {
-      print('Error sending message: $error');
+      log('Error sending message: $error');
       rethrow;
     }
   }
@@ -586,7 +702,7 @@ class ChatService {
       // The user will be notified via the GlobalNotificationManager if their app is closed
       // or via real-time UI updates if their app is open
 
-      print(
+      log(
         'Support response sent to chat for userId: $userId (userName: $userName), message ID: $messageId',
       );
       return {
@@ -597,7 +713,7 @@ class ChatService {
         'chatDocId': chatDocRef.id,
       };
     } catch (error) {
-      print('Error sending support response: $error');
+      log('Error sending support response: $error');
       rethrow;
     }
   }
@@ -647,10 +763,10 @@ class ChatService {
         'lastUpdated': Timestamp.now(),
       });
 
-      print('Support message edited: $messageId for userId: $userId');
+      log('Support message edited: $messageId for userId: $userId');
       return {'success': true, 'messageId': messageId, 'userId': userId};
     } catch (error) {
-      print('Error editing support message: $error');
+      log('Error editing support message: $error');
       rethrow;
     }
   }
@@ -692,10 +808,10 @@ class ChatService {
         'lastUpdated': Timestamp.now(),
       });
 
-      print('Support message deleted: $messageId for userId: $userId');
+      log('Support message deleted: $messageId for userId: $userId');
       return {'success': true, 'messageId': messageId, 'userId': userId};
     } catch (error) {
-      print('Error deleting support message: $error');
+      log('Error deleting support message: $error');
       rethrow;
     }
   }
@@ -703,7 +819,7 @@ class ChatService {
   // Delete expired chat messages (older than 2 hours)
   Future<Map<String, dynamic>> cleanupExpiredMessages() async {
     try {
-      print('🧹 Starting cleanup of expired chat messages...');
+      log('🧹 Starting cleanup of expired chat messages...');
 
       final now = DateTime.now();
       final cutoffTime = now.subtract(const Duration(hours: 2));
@@ -745,7 +861,7 @@ class ChatService {
             if (updatedMessages.isEmpty) {
               // Delete entire document if no messages remain
               await docSnapshot.reference.delete();
-              print(
+              log(
                 '🗑️ Deleted entire chat document: ${docSnapshot.id} ($deletedMessagesCount expired messages)',
               );
             } else {
@@ -754,7 +870,7 @@ class ChatService {
                 'messages': updatedMessages,
                 'lastUpdated': Timestamp.now(),
               });
-              print(
+              log(
                 '🧹 Cleaned $deletedMessagesCount expired messages from chat: ${docSnapshot.id}',
               );
             }
@@ -768,11 +884,11 @@ class ChatService {
             });
           }
         } catch (deleteError) {
-          print('❌ Error processing chat ${docSnapshot.id}: $deleteError');
+          log('❌ Error processing chat ${docSnapshot.id}: $deleteError');
         }
       }
 
-      print(
+      log(
         '✅ Cleanup completed. Processed ${processedChats.length} chats, deleted $totalDeletedMessages expired messages.',
       );
 
@@ -782,7 +898,7 @@ class ChatService {
         'processedChats': processedChats,
       };
     } catch (error) {
-      print('❌ Error during cleanup: $error');
+      log('❌ Error during cleanup: $error');
       return {'success': false, 'error': error.toString()};
     }
   }
@@ -804,7 +920,7 @@ class ChatService {
   // Delete a user's chat document (for reset functionality)
   Future<Map<String, dynamic>> deleteChatThread(String userId) async {
     try {
-      print('🗑️ Deleting chat document for userId: $userId');
+      log('🗑️ Deleting chat document for userId: $userId');
 
       // Find the existing chat document
       final querySnapshot = await _firestore
@@ -818,7 +934,7 @@ class ChatService {
         final chatData = querySnapshot.docs.first.data();
         final userName = chatData['userName'] ?? 'Unknown User';
         await chatDocRef.delete();
-        print('✅ Chat document deleted successfully');
+        log('✅ Chat document deleted successfully');
         return {
           'success': true,
           'userId': userId,
@@ -826,7 +942,7 @@ class ChatService {
           'chatDocId': chatDocRef.id,
         };
       } else {
-        print('ℹ️ No chat document found to delete for userId: $userId');
+        log('ℹ️ No chat document found to delete for userId: $userId');
         return {
           'success': true,
           'userId': userId,
@@ -834,7 +950,7 @@ class ChatService {
         };
       }
     } catch (error) {
-      print('❌ Error deleting chat document: $error');
+      log('❌ Error deleting chat document: $error');
       rethrow;
     }
   }
@@ -846,9 +962,8 @@ class ChatService {
       final last24Hours = now.subtract(const Duration(hours: 24));
 
       // Get all threads
-      final allThreadsSnapshot = await _firestore
-          .collection(chatCollection)
-          .get();
+      final allThreadsSnapshot =
+          await _firestore.collection(chatCollection).get();
 
       // Get recent threads (last 24 hours)
       final recentThreadsSnapshot = await _firestore
@@ -870,12 +985,10 @@ class ChatService {
         }
 
         totalMessages += thread.messages.length;
-        totalUserMessages += thread.messages
-            .where((msg) => msg.isFromUser)
-            .length;
-        totalSupportMessages += thread.messages
-            .where((msg) => msg.isFromSupport)
-            .length;
+        totalUserMessages +=
+            thread.messages.where((msg) => msg.isFromUser).length;
+        totalSupportMessages +=
+            thread.messages.where((msg) => msg.isFromSupport).length;
       }
 
       return {
@@ -887,7 +1000,7 @@ class ChatService {
         'totalSupportMessages': totalSupportMessages,
       };
     } catch (error) {
-      print('Error getting chat statistics: $error');
+      log('Error getting chat statistics: $error');
       return {};
     }
   }
@@ -906,10 +1019,10 @@ class ChatService {
         final chatDocRef = querySnapshot.docs.first.reference;
         await chatDocRef.update({'lastViewedBySupport': Timestamp.now()});
       } else {
-        print('No chat document found for userId: $userId');
+        log('No chat document found for userId: $userId');
       }
     } catch (error) {
-      print('Error marking thread as read: $error');
+      log('Error marking thread as read: $error');
       rethrow;
     }
   }
@@ -925,25 +1038,25 @@ class ChatService {
         .orderBy('lastUpdated', descending: true)
         .snapshots()
         .map((snapshot) {
-          final allThreads = snapshot.docs.map((doc) {
-            return ChatThread.fromMap(doc.id, doc.data());
-          }).toList();
+      final allThreads = snapshot.docs.map((doc) {
+        return ChatThread.fromMap(doc.id, doc.data());
+      }).toList();
 
-          // Filter threads based on search query
-          return allThreads.where((thread) {
-            final query = searchQuery.toLowerCase();
+      // Filter threads based on search query
+      return allThreads.where((thread) {
+        final query = searchQuery.toLowerCase();
 
-            // Search in user name
-            if (thread.userName.toLowerCase().contains(query)) {
-              return true;
-            }
+        // Search in user name
+        if (thread.userName.toLowerCase().contains(query)) {
+          return true;
+        }
 
-            // Search in messages
-            return thread.messages.any((message) {
-              return message.message.toLowerCase().contains(query);
-            });
-          }).toList();
+        // Search in messages
+        return thread.messages.any((message) {
+          return message.message.toLowerCase().contains(query);
         });
+      }).toList();
+    });
   }
 
   // Test function to verify the chat system with new structure
@@ -952,26 +1065,26 @@ class ChatService {
       final userId = testUserId ?? generateAnonymousUserId();
       final userName = 'Test_User_${DateTime.now().millisecondsSinceEpoch}';
 
-      print('🧪 Starting chat flow test with new structure...');
-      print('Test User ID: $userId');
-      print('Test User Name: $userName');
+      log('🧪 Starting chat flow test with new structure...');
+      log('Test User ID: $userId');
+      log('Test User Name: $userName');
 
       // Step 1: Send a user message
-      print('📤 Step 1: Sending user message...');
+      log('📤 Step 1: Sending user message...');
       final userResult = await sendChatMessage(
         'This is a test message from the Flutter app',
         userId,
         userName,
       );
-      print('✅ User message sent: $userResult');
+      log('✅ User message sent: $userResult');
 
       // Step 2: Send a support response
-      print('📤 Step 2: Sending support response...');
+      log('📤 Step 2: Sending support response...');
       final supportResult = await sendSupportResponse(
         userName,
         'This is a test response from support',
       );
-      print('✅ Support response sent: $supportResult');
+      log('✅ Support response sent: $supportResult');
 
       return {
         'success': true,
@@ -981,7 +1094,7 @@ class ChatService {
         'supportResult': supportResult,
       };
     } catch (error) {
-      print('❌ Chat flow test failed: $error');
+      log('❌ Chat flow test failed: $error');
       return {'success': false, 'error': error.toString()};
     }
   }
